@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <title>極速逃生：知識之門</title>
+    <style>
+        body { margin: 0; overflow: hidden; font-family: 'Arial', sans-serif; }
+        canvas { display: block; }
+        
+        /* UI 層 */
+        #ui-container {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        #question-box {
+            margin-top: 50px;
+            padding: 20px;
+            background: rgba(0, 0, 0, 0.7);
+            color: white;
+            border-radius: 15px;
+            font-size: 32px;
+            font-weight: bold;
+            text-align: center;
+            border: 2px solid #fff;
+            pointer-events: none;
+        }
+
+        #info-panel {
+            position: absolute;
+            bottom: 20px;
+            left: 20px;
+            color: white;
+            background: rgba(0,0,0,0.5);
+            padding: 10px;
+        }
+
+        #crosshair {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            width: 20px;
+            height: 20px;
+            border: 2px solid white;
+            border-radius: 50%;
+            transform: translate(-50%, -50%);
+        }
+
+        #game-over {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: rgba(255, 0, 0, 0.8);
+            color: white;
+            padding: 40px;
+            text-align: center;
+            display: none;
+            pointer-events: auto;
+        }
+        
+        button {
+            padding: 10px 20px;
+            font-size: 20px;
+            cursor: pointer;
+            margin-top: 10px;
+        }
+    </style>
+</head>
+<body>
+
+<div id="ui-container">
+    <div id="question-box">點擊畫面開始逃生！</div>
+    <div id="crosshair"></div>
+    <div id="info-panel">
+        分數: <span id="score">0</span> | 難度 (門數): <span id="difficulty">2</span><br>
+        操作: WASD 移動, 滑鼠轉向, 空白鍵跳躍
+    </div>
+    <div id="game-over">
+        <h1>你被抓住了！</h1>
+        <p>最終分數: <span id="final-score">0</span></p>
+        <button onclick="location.reload()">重新挑戰</button>
+    </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+
+<script>
+/** 遊戲變數 **/
+let scene, camera, renderer, monster;
+let moveForward = false, moveBackward = false, moveLeft = false, moveRight = false, canJump = false;
+let velocity = new THREE.Vector3();
+let direction = new THREE.Vector3();
+let doors = [];
+let currentAnswer = null;
+let score = 0;
+let doorCount = 2;
+let isGameOver = false;
+let gameStarted = false;
+
+// 物理參數
+const playerHeight = 1.6;
+const speed = 400.0;
+const monsterSpeed = 4.5;
+
+/** 初始化場景 **/
+function init() {
+    scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x87CEEB); // 天藍色
+    scene.fog = new THREE.Fog(0x87CEEB, 0, 50);
+
+    camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+    camera.position.y = playerHeight;
+
+    renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.shadowMap.enabled = true;
+    document.body.appendChild(renderer.domElement);
+
+    // 燈光
+    const light = new THREE.HemisphereLight(0xeeeeff, 0x777788, 0.75);
+    scene.add(light);
+    const dirLight = new THREE.DirectionalLight(0xffffff, 0.5);
+    dirLight.position.set(10, 20, 10);
+    scene.add(dirLight);
+
+    // 地面 (無限循環感)
+    const floorGeo = new THREE.PlaneGeometry(2000, 2000, 100, 100);
+    floorGeo.rotateX(-Math.PI / 2);
+    const floorMat = new THREE.MeshPhongMaterial({ color: 0x556655 });
+    const floor = new THREE.Mesh(floorGeo, floorMat);
+    scene.add(floor);
+
+    // 創建物怪獸 (紅色巨型低多邊形)
+    const monsterGeo = new THREE.BoxGeometry(4, 8, 4);
+    const monsterMat = new THREE.MeshPhongMaterial({ color: 0xff0000 });
+    monster = new THREE.Mesh(monsterGeo, monsterMat);
+    monster.position.set(0, 4, 10); // 起始在玩家後方
+    scene.add(monster);
+
+    createLevel();
+    setupControls();
+    animate();
+}
+
+/** 問答與門生成系統 **/
+function createLevel() {
+    // 移除舊的門
+    doors.forEach(d => scene.remove(d.group));
+    doors = [];
+
+    // 產生問題 (加減乘法)
+    const ops = ['+', '-', '×'];
+    const op = ops[Math.floor(Math.random() * ops.length)];
+    let a, b, ans;
+
+    if(op === '+') { a = rand(1, 20); b = rand(1, 20); ans = a + b; }
+    else if(op === '-') { a = rand(10, 30); b = rand(1, 10); ans = a - b; }
+    else { a = rand(2, 9); b = rand(2, 9); ans = a * b; }
+
+    document.getElementById('question-box').innerText = `${a} ${op} ${b} = ?`;
+    currentAnswer = ans;
+
+    // 產生正確答案的位置
+    const correctIndex = Math.floor(Math.random() * doorCount);
+    const spacing = 4;
+    const startX = -((doorCount - 1) * spacing) / 2;
+
+    for (let i = 0; i < doorCount; i++) {
+        const isCorrect = (i === correctIndex);
+        const val = isCorrect ? ans : ans + rand(-5, 5) + (Math.random() > 0.5 ? 1 : -1);
+        
+        const doorGroup = new THREE.Group();
+        
+        // 木門模型 (Lowpoly)
+        const doorGeo = new THREE.BoxGeometry(3, 5, 0.5);
+        const doorMat = new THREE.MeshPhongMaterial({ color: 0x8B4513 });
+        const doorMesh = new THREE.Mesh(doorGeo, doorMat);
+        doorGroup.add(doorMesh);
+
+        // 門上的數字
+        const sprite = createTextSprite(val.toString());
+        sprite.position.y = 1;
+        sprite.position.z = 0.3;
+        doorGroup.add(sprite);
+
+        doorGroup.position.set(startX + i * spacing, 2.5, camera.position.z - 30);
+        scene.add(doorGroup);
+        doors.push({ group: doorGroup, correct: isCorrect });
+    }
+}
+
+function createTextSprite(text) {
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+    canvas.width = 256; canvas.height = 256;
+    ctx.fillStyle = 'white';
+    ctx.font = 'Bold 120px Arial';
+    ctx.textAlign = 'center';
+    ctx.fillText(text, 128, 160);
+    const texture = new THREE.CanvasTexture(canvas);
+    const mat = new THREE.SpriteMaterial({ map: texture });
+    const sprite = new THREE.Sprite(mat);
+    sprite.scale.set(1.5, 1.5, 1);
+    return sprite;
+}
+
+/** 控制邏輯 **/
+function setupControls() {
+    document.addEventListener('click', () => {
+        if (!gameStarted) {
+            document.body.requestPointerLock();
+        }
+    });
+
+    document.addEventListener('pointerlockchange', () => {
+        gameStarted = (document.pointerLockElement === document.body);
+    });
+
+    document.addEventListener('mousemove', (e) => {
+        if (gameStarted && !isGameOver) {
+            camera.rotation.y -= e.movementX * 0.002;
+            const newPitch = camera.rotation.x - e.movementY * 0.002;
+            camera.rotation.x = Math.max(-Math.PI/2, Math.min(Math.PI/2, newPitch));
+        }
+    });
+
+    const onKey = (val) => (e) => {
+        switch (e.code) {
+            case 'KeyW': moveForward = val; break;
+            case 'KeyS': moveBackward = val; break;
+            case 'KeyA': moveLeft = val; break;
+            case 'KeyD': moveRight = val; break;
+            case 'Space': if (val && canJump) velocity.y += 5; canJump = false; break;
+        }
+    };
+    document.addEventListener('keydown', onKey(true));
+    document.addEventListener('keyup', onKey(false));
+}
+
+/** 遊戲循環 **/
+let prevTime = performance.now();
+function animate() {
+    requestAnimationFrame(animate);
+    if (!gameStarted || isGameOver) return;
+
+    const time = performance.now();
+    const delta = (time - prevTime) / 1000;
+
+    // 玩家物理
+    velocity.x -= velocity.x * 10.0 * delta;
+    velocity.z -= velocity.z * 10.0 * delta;
+    velocity.y -= 9.8 * 2.0 * delta; // 重力
+
+    direction.z = Number(moveForward) - Number(moveBackward);
+    direction.x = Number(moveRight) - Number(moveLeft);
+    direction.normalize();
+
+    if (moveForward || moveBackward) velocity.z -= direction.z * speed * delta;
+    if (moveLeft || moveRight) velocity.x -= direction.x * speed * delta;
+
+    camera.translateX(-velocity.x * delta);
+    camera.translateZ(velocity.z * delta);
+    camera.position.y += (velocity.y * delta);
+
+    if (camera.position.y < playerHeight) {
+        velocity.y = 0;
+        camera.position.y = playerHeight;
+        canJump = true;
+    }
+
+    // 怪獸追蹤 (簡單線性追蹤)
+    monster.position.z -= monsterSpeed * delta;
+    monster.position.x += (camera.position.x - monster.position.x) * 0.01;
+
+    // 檢查門碰撞
+    doors.forEach((door, index) => {
+        const dist = camera.position.distanceTo(door.group.position);
+        if (dist < 2) {
+            if (door.correct) {
+                score++;
+                doorCount = Math.min(6, 2 + Math.floor(score / 3)); // 難度提升
+                document.getElementById('score').innerText = score;
+                document.getElementById('difficulty').innerText = doorCount;
+                createLevel();
+            } else {
+                gameOver();
+            }
+        }
+    });
+
+    // 檢查被怪獸抓到
+    if (monster.position.distanceTo(camera.position) < 3) {
+        gameOver();
+    }
+
+    // 避免玩家跑太遠沒過門
+    if (camera.position.z < doors[0].group.position.z - 5) {
+        gameOver(); // 跑錯邊或錯過門
+    }
+
+    renderer.render(scene, camera);
+    prevTime = time;
+}
+
+function gameOver() {
+    isGameOver = true;
+    document.exitPointerLock();
+    document.getElementById('game-over').style.display = 'block';
+    document.getElementById('final-score').innerText = score;
+}
+
+function rand(min, max) { return Math.floor(Math.random() * (max - min + 1) + min); }
+
+init();
+</script>
+</body>
+</html>
